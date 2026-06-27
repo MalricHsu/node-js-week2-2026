@@ -1,7 +1,9 @@
-const http = require('node:http');
-const fs = require('node:fs');
-const { formidable } = require('formidable');  // formidable v3 用 named import
-
+const http = require("node:http");
+const fs = require("node:fs");
+const { formidable } = require("formidable"); // formidable v3 用 named import
+const dotenv = require("dotenv");
+const { log } = require("node:console");
+dotenv.config();
 // ========== 任務一：讀取上傳設定 ==========
 /**
  * 從 process.env 讀取上傳相關設定，回傳設定物件。
@@ -26,8 +28,10 @@ const { formidable } = require('formidable');  // formidable v3 用 named import
  *   // { uploadDir: '/tmp/uploads', maxFileSize: 10485760, gymName: 'FitClub' }
  */
 function getUploadConfig() {
-  // TODO: 實作此函式
-  // 提示：用 || 給預設值；MAX_FILE_SIZE_MB 是字串，記得先 Number() 轉型再換算 bytes
+  const uploadDir = process.env.UPLOAD_DIR || "/tmp";
+  const maxFileSize = (Number(process.env.MAX_FILE_SIZE_MB) || 5) * 1024 * 1024;
+  const gymName = process.env.GYM_NAME || "未命名健身房";
+  return { uploadDir, maxFileSize, gymName };
 }
 
 // ========== 任務二：取副檔名 ==========
@@ -49,9 +53,14 @@ function getUploadConfig() {
  *   getFileExtension('README');      // ''
  */
 function getFileExtension(filename) {
-  // TODO: 實作此函式
-  // 提示：用 lastIndexOf('.') 找最後一個 .，toLowerCase() 轉小寫
+  const dotIndex = filename.lastIndexOf(".");
+  if (dotIndex === -1) {
+    return "";
+  }
+  return filename.slice(dotIndex).toLowerCase();
 }
+
+// console.log(getFileExtension("cat.jpg"));
 
 // ========== 任務三：解析檔案 metadata ==========
 /**
@@ -76,7 +85,13 @@ function getFileExtension(filename) {
 function parseFileMetadata(file) {
   // TODO: 實作此函式
   // 提示：呼叫 getFileExtension 取副檔名，Math.round(size / 1024) 算 KB
+  return {
+    filename: file.originalFilename,
+    sizeKB: Math.round(file.size / 1024),
+    ext: getFileExtension(file.originalFilename),
+  };
 }
+// console.log(parseFileMetadata({ originalFilename: "leo.jpg", size: 250000 }));
 
 // ========== 任務四：產出 upload log 字串 ==========
 /**
@@ -98,7 +113,14 @@ function parseFileMetadata(file) {
 function formatUploadLog(meta, config) {
   // TODO: 實作此函式
   // 提示：用 template literal 組字串
+  return `[${config.gymName}] Uploaded ${meta.filename} (${meta.sizeKB} KB) → ${config.uploadDir}`;
 }
+// console.log(
+//   formatUploadLog(
+//     { filename: "leo.jpg", sizeKB: 245, ext: ".jpg" },
+//     { uploadDir: "/tmp/uploads", gymName: "FitClub" },
+//   ),
+// );
 
 // ========== 任務五：路由分派 ==========
 /**
@@ -126,6 +148,58 @@ function formatUploadLog(meta, config) {
  *   http.createServer((req, res) => router(req, res, config))
  */
 function router(req, res, config) {
+  const handleUpload = (req, res, config) => {
+    const form = formidable({
+      uploadDir: config.uploadDir,
+      maxFileSize: config.maxFileSize,
+      keepExtensions: true,
+    });
+    //負責監控
+    form.on("error", (error) => {
+      console.log(error);
+    });
+    //負責回應
+    form.parse(req, (error, fields, files) => {
+      if (error) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.write(JSON.stringify({ error: error.message }));
+        res.end();
+        return;
+      }
+      const file = files.file && files.file[0];
+      if (!file) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.write(JSON.stringify({ error: "No file uploaded" }));
+        res.end();
+        return;
+      }
+      //解析檔案＋log記錄
+      const meta = parseFileMetadata(file);
+      console.log(formatUploadLog(meta, config));
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.write(
+        JSON.stringify({
+          filename: meta.filename,
+          sizeKB: meta.sizeKB,
+          ext: meta.ext,
+          savedPath: file.filepath,
+        }),
+      );
+      res.end();
+    });
+  };
+  const handleNotFound = (req, res) => {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.write(JSON.stringify({ error: "Not Found" }));
+    res.end();
+  };
+  if (req.url == "/coaches/avatar" && req.method == "POST") {
+    handleUpload(req, res, config);
+  } else {
+    handleNotFound(req, res);
+  }
+
   // TODO: 實作此函式
   // 建議（非強制）：
   //   - 拆出 handleUpload(req, res, config)：formidable 解析邏輯
@@ -136,7 +210,7 @@ function router(req, res, config) {
   //   - form.on('error', ...) 不需再處理 res 相關，避免產生回應兩次的錯誤。這個部分可用來紀錄 log、清理暫存檔、額外監控等等。目前可先有此概念即可，或者初步撰寫如下：
   //     form.on('error', (err) => {
   //       console.log(err); // 記錄 log、清理暫存檔、額外監控可以寫在這邊
-  //     });  
+  //     });
 }
 
 // ========== 任務六：建立上傳 server ==========
@@ -156,6 +230,13 @@ function router(req, res, config) {
  *   server.listen(3000);  // ← 這行由 app.js 呼叫
  */
 function createUploadServer(config) {
+  if (!fs.existsSync(config.uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+  }
+  const server = http.createServer((req, res) => {
+    router(req, res, config);
+  });
+  return server;
   // TODO: 實作此函式
   // 提示：主邏輯都在 router 裡，這邊函式內容不多
 }
